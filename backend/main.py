@@ -15,6 +15,7 @@ Then visit:
 """
 
 import io
+import os
 import numpy as np
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,10 +38,20 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Allow React frontend (running on localhost:3000) to call this API
+# Allow the React frontend to call this API.
+# Local dev origins are always allowed. For the deployed frontend, set
+# FRONTEND_ORIGIN on Render to your Vercel URL, e.g.
+#   FRONTEND_ORIGIN=https://cs-audio-analyzer.vercel.app
+# Supports a comma-separated list if you have multiple (e.g. a Vercel
+# preview-deployment domain plus your production domain).
+_allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+_frontend_origin = os.environ.get("FRONTEND_ORIGIN", "")
+if _frontend_origin:
+    _allowed_origins += [o.strip() for o in _frontend_origin.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -236,7 +247,7 @@ async def upload_audio(file: UploadFile = File(...)):
         )
 
     # Truncate to max 4096 samples for reasonable CS computation time
-    MAX_SAMPLES = 4096
+    MAX_SAMPLES = 2048
     if len(signal) > MAX_SAMPLES:
         signal = signal[:MAX_SAMPLES]
 
@@ -302,3 +313,68 @@ def reconstruct(req: ReconstructRequest):
         raise HTTPException(status_code=500, detail=f"CS pipeline failed: {str(e)}")
 
     return _result_to_response(result)
+
+
+# ── Phase 4: Classification endpoint ─────────────────────────
+
+class ClassifyRequest(BaseModel):
+    use_reconstructed: bool = Field(
+        default=True,
+        description="If True classify the reconstructed signal. If False classify original."
+    )
+    use_demo: bool = Field(default=False)
+
+
+class ClassifyResponse(BaseModel):
+    predicted_class:  str
+    confidence:       float
+    all_scores:       dict
+    feature_summary:  dict
+    signal_stats:     dict
+    class_label:      str
+    class_description: str
+    class_color:      str
+    class_icon:       str
+
+
+@app.post("/classify", response_model=ClassifyResponse, tags=["ML Classification"])
+def classify(req: ClassifyRequest):
+    """
+    Classify an audio signal into: tone / noise / music / speech.
+
+    Uses MFCCs, spectral centroid, zero crossing rate, rolloff, and RMS
+    as features fed into a RandomForest trained on synthetic data.
+
+    Call this after /reconstruct to classify the reconstructed signal,
+    or set use_reconstructed=False to classify the original.
+    """
+    global _current_signal, _current_samplerate
+
+    if req.use_demo or _current_signal is None:
+        signal, sr = generate_demo_signal()
+    else:
+        signal = _current_signal
+        sr     = _current_samplerate
+
+    try:
+        from classifier import classify_signal, CLASS_INFO
+        result = classify_signal(signal, int(sr))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Classification failed: {str(e)}")
+
+    info = CLASS_INFO[result.predicted_class]
+
+    # Clean np.str_ keys from sklearn
+    clean_scores = {str(k): float(v) for k, v in result.all_scores.items()}
+
+    return ClassifyResponse(
+        predicted_class   = result.predicted_class,
+        confidence        = result.confidence,
+        all_scores        = clean_scores,
+        feature_summary   = result.feature_summary,
+        signal_stats      = result.signal_stats,
+        class_label       = info["label"],
+        class_description = info["description"],
+        class_color       = info["color"],
+        class_icon        = info["icon"],
+    )

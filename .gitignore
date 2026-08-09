@@ -1,2 +1,32 @@
-.env
-/node_modules
+# ── Backend ──────────────────────────────────
+backend/__pycache__/
+backend/*.pyc
+backend/.venv/
+backend/venv/
+
+# Raw training datasets — way too large for git, and not needed in
+# production since the trained model is committed instead (see below).
+backend/UrbanSound8K/
+backend/LibriSpeech/
+
+# NOTE: audio_classifier_model.joblib is intentionally NOT ignored.
+# Render's server has no access to the raw datasets above, so the
+# trained model file must be committed to the repo for the deployed
+# backend to load it. If you retrain locally and the file changes,
+# commit the new version.
+
+# Local env files (put your Render backend URL etc. here for local overrides)
+backend/.env
+frontend/.env.local
+
+# ── Frontend ─────────────────────────────────
+frontend/node_modules/
+frontend/build/
+frontend/.env.local
+
+# ── OS / editor ──────────────────────────────
+.DS_Store
+*.swp
+
+# ── Extras ──────────────────────────────
+node_modules/
