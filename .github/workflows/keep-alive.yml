@@ -1,0 +1,25 @@
+name: Keep Render backend awake
+
+# Render's free tier sleeps after ~15 min of no requests. Pinging /health
+# every 10 minutes keeps it from ever crossing that threshold, so real
+# users never eat the 50+ second cold-start delay.
+#
+# Note: GitHub disables scheduled workflows automatically after 60 days
+# with no commits to the repo. If that happens, just push any commit (or
+# open this workflow's "Actions" tab and click "Re-enable workflow") to
+# turn it back on.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes
+  workflow_dispatch:          # lets you trigger it manually from the Actions tab
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping backend health endpoint
+        run: |
+          curl -sf https://cs-audio-analyzer.onrender.com/health \
+            && echo "Backend is awake." \
+            || echo "Ping failed (backend may be cold-starting or down)."
