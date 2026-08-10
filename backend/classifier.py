@@ -111,6 +111,35 @@ def _sample_windows(signal: np.ndarray,
     return [signal[s:s + window_len] for s in starts]
 
 
+def synthetic_demo_tone(seed: int = 42,
+                        n_samples: int = CLASSIFY_WINDOW_SAMPLES,
+                        sr: int = SAMPLE_RATE) -> np.ndarray:
+    """
+    A short, clean synthetic tone generated DIRECTLY at the classifier's
+    native SAMPLE_RATE — used only for the "Classify Signal" demo button,
+    deliberately decoupled from the CS reconstruction demo's own signal.
+
+    Why decoupled: the CS reconstruction demo uses sample_rate=1000 (a
+    choice specific to that pipeline's sparsity demonstration), which
+    Nyquist-limits it to frequencies below 500Hz. A 256-sample/32ms
+    classification window can't resolve such low frequencies cleanly —
+    e.g. a 50Hz component only completes ~1.6 cycles in 32ms, nowhere
+    near enough to look "tonal" to a short-time spectral analysis. Real
+    tonal sounds that classify correctly (e.g. a whistle) are typically
+    1000+ Hz, completing dozens of cycles in the same window. So this
+    generates directly at SAMPLE_RATE (no resampling needed at all) using
+    frequencies high enough to resolve cleanly in a short window —
+    matching what actually works for real audio, rather than reusing the
+    CS demo's low-frequency, classification-unfriendly signal.
+    """
+    t = np.arange(n_samples) / sr
+    freqs = [600, 1100, 1700]
+    amps  = [1.0, 0.6, 0.4]
+    signal = sum(a * np.sin(2 * np.pi * f * t) for f, a in zip(freqs, amps))
+    peak = np.max(np.abs(signal)) + 1e-10
+    return signal / peak
+
+
 def pick_energetic_window(signal: np.ndarray,
                           window_len: int = CLASSIFY_WINDOW_SAMPLES,
                           n_candidates: int = 5,

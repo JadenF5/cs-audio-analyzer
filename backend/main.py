@@ -388,14 +388,23 @@ def classify(req: ClassifyRequest):
     """
     global _current_signal, _current_samplerate
 
+    from classifier import classify_signal, CLASS_INFO, synthetic_demo_tone, SAMPLE_RATE
+
     if req.use_demo or _current_signal is None:
-        signal, sr = generate_demo_signal()
+        # NOTE: deliberately NOT cs_engine.generate_demo_signal() here.
+        # That signal uses sample_rate=1000 (chosen for the CS pipeline's
+        # sparsity demo), which Nyquist-limits it to low frequencies that
+        # can't be resolved cleanly in the short 32ms window classification
+        # actually analyzes. synthetic_demo_tone() generates directly at
+        # the classifier's native rate with frequencies chosen to resolve
+        # well in that window instead. See its docstring for the full
+        # reasoning.
+        signal, sr = synthetic_demo_tone(), SAMPLE_RATE
     else:
         signal = _current_signal
         sr     = _current_samplerate
 
     try:
-        from classifier import classify_signal, CLASS_INFO
         result = classify_signal(signal, int(sr))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Classification failed: {str(e)}")
