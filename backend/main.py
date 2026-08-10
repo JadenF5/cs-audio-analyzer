@@ -234,12 +234,35 @@ async def upload_audio(file: UploadFile = File(...)):
         import librosa
         contents = await file.read()
         audio_buffer = io.BytesIO(contents)
-        signal, sr = librosa.load(audio_buffer, sr=None, mono=True, duration=2.0)
+        # Resample to a fixed rate (matches classifier.SAMPLE_RATE) rather
+        # than keeping each file's native rate. Otherwise, truncating to
+        # MAX_SAMPLES below captures a wildly different duration depending
+        # on the upload's original sample rate — e.g. 256 raw samples from
+        # a 44.1kHz file is ~6ms, way too short to mean anything, while
+        # the demo signal's 256 samples represent a much longer window.
+        UPLOAD_SR = 8000
+        signal, sr = librosa.load(audio_buffer, sr=UPLOAD_SR, mono=True, duration=2.0)
+
+        # Trim leading/trailing silence before truncating below. Otherwise
+        # a file with a quiet lead-in (very common in real recordings —
+        # room tone before someone starts talking) can have its first
+        # MAX_SAMPLES land entirely inside near-total silence: a
+        # degenerate, ~zero-variance signal that produces NaN downstream
+        # (see compute_metrics in cs_engine.py) and can crash the frontend.
+        signal, _ = librosa.effects.trim(signal, top_db=25)
+        if len(signal) < int(0.05 * UPLOAD_SR):   # trimmed away to ~nothing
+            raise HTTPException(
+                status_code=400,
+                detail="This file appears to be silent (or nearly silent) "
+                       "after trimming. Please upload a file with audible sound."
+            )
     except ImportError:
         raise HTTPException(
             status_code=500,
             detail="librosa not installed. Run: pip install librosa"
         )
+    except HTTPException:
+        raise   # let our own clean 400s (e.g. "file is silent") pass through untouched
     except Exception as e:
         raise HTTPException(
             status_code=400,
@@ -247,6 +270,12 @@ async def upload_audio(file: UploadFile = File(...)):
         )
 
     # Truncate to max 4096 samples for reasonable CS computation time
+    # Truncate uploaded audio to a size the CS solve can actually handle
+    # quickly. build_sensing_matrix() builds a dense N×N matrix and the
+    # l1-minimization solve scales roughly N²-N³ — 256 (matching the demo
+    # signal, already proven fast) keeps this responsive even on a
+    # constrained free-tier CPU. A much larger N (the old 2048 cap) can
+    # take long enough to time out or fail outright under limited compute.
     MAX_SAMPLES = 256
     if len(signal) > MAX_SAMPLES:
         signal = signal[:MAX_SAMPLES]

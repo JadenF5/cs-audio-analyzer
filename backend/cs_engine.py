@@ -131,7 +131,19 @@ def compute_metrics(original: np.ndarray,
     sig_pow  = float(np.mean(original ** 2))
     snr_db   = float(10 * np.log10(sig_pow / max(mse, 1e-12)))
     max_err  = float(np.max(np.abs(original - reconstructed)))
-    corr     = float(np.corrcoef(original, reconstructed)[0, 1])
+
+    # Guard against NaN: corrcoef is a 0/0 division whenever either signal
+    # has ~zero variance (e.g. a near-silent input, or a degenerate
+    # all-zero reconstruction). NaN doesn't serialize safely to JSON and
+    # can crash the frontend outright, so fall back to 0.0 (no meaningful
+    # correlation) instead of ever returning NaN.
+    if np.std(original) < 1e-9 or np.std(reconstructed) < 1e-9:
+        corr = 0.0
+    else:
+        corr = float(np.corrcoef(original, reconstructed)[0, 1])
+        if np.isnan(corr):
+            corr = 0.0
+
     return dict(snr_db=snr_db, mse=mse, max_error=max_err, correlation=corr)
 
 
