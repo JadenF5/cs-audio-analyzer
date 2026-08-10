@@ -131,10 +131,20 @@ def synthetic_demo_tone(seed: int = 42,
     frequencies high enough to resolve cleanly in a short window —
     matching what actually works for real audio, rather than reusing the
     CS demo's low-frequency, classification-unfriendly signal.
+
+    Frequencies must be HARMONICALLY related (integer multiples of a
+    fundamental), not arbitrary. An earlier version used unrelated
+    frequencies (600/1100/1700 Hz) — several discrete, inharmonic peaks
+    with decreasing amplitude is structurally almost identical to vowel
+    FORMANTS (a speech signature), which pulled classification toward
+    "speech" instead of "tone". A true harmonic series (f, 2f, 3f, ...)
+    is a fundamentally different, much more tone-like structure — this
+    matches how real tonal sounds (car horns, sirens) are built.
     """
     t = np.arange(n_samples) / sr
-    freqs = [600, 1100, 1700]
-    amps  = [1.0, 0.6, 0.4]
+    fundamental = 500
+    freqs = [fundamental, fundamental * 2, fundamental * 3]   # harmonic series
+    amps  = [1.0, 0.5, 0.25]
     signal = sum(a * np.sin(2 * np.pi * f * t) for f, a in zip(freqs, amps))
     peak = np.max(np.abs(signal)) + 1e-10
     return signal / peak
