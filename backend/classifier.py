@@ -555,7 +555,6 @@ def classify_signal(signal: np.ndarray,
     feeding in a signal at some other sr (e.g. the demo signal's 1000 Hz,
     or an uploaded file's 44100 Hz) produces features on a totally
     different numeric scale than what the classifier learned, causing
-    garbage predictions. We resample to SAMPLE_RATE here so inference
     IMPORTANT — two things this function must get right, both learned the
     hard way:
 
@@ -565,28 +564,33 @@ def classify_signal(signal: np.ndarray,
 
     2. Real-world DURATION, not sample count: training windows are
        CLASSIFY_WINDOW_SAMPLES long AT SAMPLE_RATE (256 samples @ 8000Hz
-       = 32ms). But the CS demo signal is generated at 1000Hz — 256
-       samples there is 256ms, 8x longer. If we resampled that straight to
-       8000Hz (preserving real duration, as resampling should), we'd hand
-       the model a 2048-sample/256ms window — a totally different analysis
-       length than what it was trained on, even though "256 samples" is
-       the same number in both cases. So we truncate to the target
-       DURATION at the signal's ORIGINAL rate first, then resample —
-       ensuring every input, regardless of its native sample rate, always
-       analyzes the same real-world 32ms slice the model actually learned.
+       = 32ms). The CS demo signal is generated at 1000Hz — 256 samples
+       there is 256ms, 8x longer — so it needs trimming down to a 32ms
+       window too. CRITICAL: resample first, THEN truncate — not the
+       other way around. Truncating to a very short slice at a low native
+       rate BEFORE resampling starves librosa's resampling filter of
+       enough input to work cleanly, producing ringing/overshoot
+       artifacts (measured: a 32-raw-sample slice resampled up to 256
+       samples overshot the original signal's own amplitude range) that
+       corrupt the extracted features far worse than the duration
+       mismatch this was meant to fix. Resampling the full signal first
+       (long enough for the filter to behave) and truncating afterward
+       avoids that entirely while still landing on the correct duration.
     """
     model = get_model()
 
-    target_duration_sec = CLASSIFY_WINDOW_SAMPLES / SAMPLE_RATE   # 32ms
-    max_native_samples = int(target_duration_sec * sr)
-    if max_native_samples > 0 and len(signal) > max_native_samples:
-        signal = signal[:max_native_samples]
-
-    # Resample to the fixed rate the model was trained on, if needed
+    # Resample to the fixed rate the model was trained on, if needed —
+    # BEFORE truncating (see docstring note above on why order matters).
     if sr != SAMPLE_RATE:
         signal = librosa.resample(signal.astype(np.float32),
                                    orig_sr=sr, target_sr=SAMPLE_RATE)
         sr = SAMPLE_RATE
+
+    # Now truncate to the target window length, post-resample — analyzes
+    # the correct ~32ms slice without resampling artifacts, matching what
+    # training saw.
+    if len(signal) > CLASSIFY_WINDOW_SAMPLES:
+        signal = signal[:CLASSIFY_WINDOW_SAMPLES]
 
     # Extract features
     features = extract_features(signal, sr).reshape(1, -1)
