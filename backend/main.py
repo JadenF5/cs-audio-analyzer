@@ -269,16 +269,25 @@ async def upload_audio(file: UploadFile = File(...)):
             detail=f"Could not load audio file: {str(e)}"
         )
 
-    # Truncate to max 4096 samples for reasonable CS computation time
     # Truncate uploaded audio to a size the CS solve can actually handle
     # quickly. build_sensing_matrix() builds a dense N×N matrix and the
     # l1-minimization solve scales roughly N²-N³ — 256 (matching the demo
     # signal, already proven fast) keeps this responsive even on a
     # constrained free-tier CPU. A much larger N (the old 2048 cap) can
     # take long enough to time out or fail outright under limited compute.
+    #
+    # Use an energy-based window pick rather than always the literal first
+    # 256 samples: the classifier is trained on randomly-positioned windows
+    # (see classifier.py's _sample_windows), which mostly land on real
+    # voiced/energetic content. Always grabbing the first slice right after
+    # the silence trim instead tends to grab onset/attack transients — a
+    # systematically different, less representative distribution than what
+    # training saw, which was hurting classification accuracy on real
+    # uploads (most noticeably for speech).
     MAX_SAMPLES = 256
     if len(signal) > MAX_SAMPLES:
-        signal = signal[:MAX_SAMPLES]
+        from classifier import pick_energetic_window
+        signal = pick_energetic_window(signal, window_len=MAX_SAMPLES, seed=0)
 
     # Store in memory
     _current_signal     = signal

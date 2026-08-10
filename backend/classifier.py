@@ -111,6 +111,35 @@ def _sample_windows(signal: np.ndarray,
     return [signal[s:s + window_len] for s in starts]
 
 
+def pick_energetic_window(signal: np.ndarray,
+                          window_len: int = CLASSIFY_WINDOW_SAMPLES,
+                          n_candidates: int = 5,
+                          seed: int | None = None) -> np.ndarray:
+    """
+    Pick a representative window from signal by sampling several candidate
+    positions and keeping the highest-energy one.
+
+    Used at INFERENCE time (main.py's /upload) instead of always grabbing
+    the literal first window. Training already samples multiple random
+    positions per file (_sample_windows above), which mostly land on real
+    voiced/energetic content simply because that's most of a typical
+    clip's duration. But a fixed "always take the first slice after the
+    silence trim" policy at inference time systematically grabs onset/
+    attack transients instead — a different, narrower distribution than
+    what training saw. Picking the most energetic of a few candidates
+    brings inference back in line with what training actually learned
+    "typical" content looks like.
+    """
+    if len(signal) <= window_len:
+        return signal
+    max_start = len(signal) - window_len
+    rng = np.random.default_rng(seed)
+    n = min(n_candidates, max_start + 1)
+    starts = rng.choice(max_start + 1, size=n, replace=False)
+    best_start = max(starts, key=lambda s: np.sum(signal[s:s + window_len] ** 2))
+    return signal[best_start:best_start + window_len]
+
+
 # ── Data container ───────────────────────────────────────────
 @dataclass
 class ClassificationResult:
@@ -527,9 +556,31 @@ def classify_signal(signal: np.ndarray,
     or an uploaded file's 44100 Hz) produces features on a totally
     different numeric scale than what the classifier learned, causing
     garbage predictions. We resample to SAMPLE_RATE here so inference
-    always matches the training distribution.
+    IMPORTANT — two things this function must get right, both learned the
+    hard way:
+
+    1. Sample rate scale: librosa's spectral features (centroid, rolloff,
+       MFCCs) are scaled by sr, so features must always be extracted at a
+       fixed SAMPLE_RATE regardless of the input's native rate.
+
+    2. Real-world DURATION, not sample count: training windows are
+       CLASSIFY_WINDOW_SAMPLES long AT SAMPLE_RATE (256 samples @ 8000Hz
+       = 32ms). But the CS demo signal is generated at 1000Hz — 256
+       samples there is 256ms, 8x longer. If we resampled that straight to
+       8000Hz (preserving real duration, as resampling should), we'd hand
+       the model a 2048-sample/256ms window — a totally different analysis
+       length than what it was trained on, even though "256 samples" is
+       the same number in both cases. So we truncate to the target
+       DURATION at the signal's ORIGINAL rate first, then resample —
+       ensuring every input, regardless of its native sample rate, always
+       analyzes the same real-world 32ms slice the model actually learned.
     """
     model = get_model()
+
+    target_duration_sec = CLASSIFY_WINDOW_SAMPLES / SAMPLE_RATE   # 32ms
+    max_native_samples = int(target_duration_sec * sr)
+    if max_native_samples > 0 and len(signal) > max_native_samples:
+        signal = signal[:max_native_samples]
 
     # Resample to the fixed rate the model was trained on, if needed
     if sr != SAMPLE_RATE:
