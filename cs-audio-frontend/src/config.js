@@ -10,3 +10,15 @@
 
 export const API_BASE_URL =
   process.env.REACT_APP_API_URL || "http://localhost:8000";
+
+// Distinguish "server was asleep and we timed out waking it" (Render's
+// free tier sleeps after ~15 min idle) from a genuine error, so the
+// message doesn't wrongly imply something is broken.
+export function friendlyError(e, fallback) {
+  if (e.code === "ECONNABORTED") {
+    return "The server was waking up from inactivity (free hosting tier) " +
+           "and took longer than expected. Please try again — it should " +
+           "be fast now that it's warm.";
+  }
+  return e.response?.data?.detail ?? `${fallback} Is the backend running?`;
+}

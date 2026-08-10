@@ -4,7 +4,7 @@
 
 import { useState } from "react";
 import axios from "axios";
-import { API_BASE_URL } from "../config";
+import { API_BASE_URL, friendlyError } from "../config";
 
 const API = API_BASE_URL;
 
@@ -83,10 +83,10 @@ export default function ClassificationCard({ useDemo }) {
       const { data } = await axios.post(`${API}/classify`, {
         use_reconstructed: true,
         use_demo: useDemo,
-      }, { timeout: 60000 });
+      }, { timeout: 90000 });   // generous — Render free tier cold start can take 50s+
       setResult(data);
     } catch (e) {
-      setError(e.response?.data?.detail ?? "Classification failed.");
+      setError(friendlyError(e, "Classification failed."));
     } finally {
       setLoading(false);
     }

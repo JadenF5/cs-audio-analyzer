@@ -1,14 +1,14 @@
 // App.jsx — Compressed Sensing Audio Analyzer
 // Main app: manages state, API calls, and layout.
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import axios from "axios";
 import ControlPanel   from "./components/ControlPanel";
 import WaveformChart  from "./components/WaveformChart";
 import FrequencyChart from "./components/FrequencyChart";
 import MetricsPanel   from "./components/MetricsPanel";
 import ClassificationCard from "./components/ClassificationCard";
-import { API_BASE_URL } from "./config";
+import { API_BASE_URL, friendlyError } from "./config";
 import "./App.css";
 
 const API = API_BASE_URL;
@@ -22,6 +22,18 @@ export default function App() {
   const [compression, setCompression] = useState(0.27);   // compression ratio slider
   const [useDemo,     setUseDemo]     = useState(true);   // demo vs uploaded file
 
+  // ── Wake up the backend as soon as the page loads ────────
+  // Render's free tier sleeps after ~15 min idle; the first request after
+  // that can take 50+ seconds. Firing a harmless /health ping on mount
+  // means the server is usually already warm by the time someone actually
+  // clicks a button, instead of that delay landing on their first action.
+  useEffect(() => {
+    axios.get(`${API}/health`).catch(() => {
+      // Ignore failures here — the real request below will surface any
+      // actual problem with a proper error message.
+    });
+  }, []);
+
   // ── Upload handler ──────────────────────────────────────
   const handleUpload = useCallback(async (file) => {
     setError(null);
@@ -31,12 +43,13 @@ export default function App() {
       form.append("file", file);
       const { data } = await axios.post(`${API}/upload`, form, {
         headers: { "Content-Type": "multipart/form-data" },
+        timeout: 90000,   // generous — Render free tier cold start can take 50s+
       });
       setUploadInfo(data);
       setUseDemo(false);
       setResult(null);
     } catch (e) {
-      setError(e.response?.data?.detail ?? "Upload failed. Is the backend running?");
+      setError(friendlyError(e, "Upload failed."));
     } finally {
       setLoading(false);
     }
@@ -53,6 +66,7 @@ export default function App() {
         // GET /demo — no body needed
         ({ data } = await axios.get(`${API}/demo`, {
           params: { compression_ratio: compression },
+          timeout: 90000,
         }));
       } else {
         // POST /reconstruct — uses last uploaded signal
@@ -60,11 +74,11 @@ export default function App() {
           compression_ratio: compression,
           use_demo: false,
           seed: 42,
-        }));
+        }, { timeout: 90000 }));
       }
       setResult(data);
     } catch (e) {
-      setError(e.response?.data?.detail ?? "Reconstruction failed. Is the backend running?");
+      setError(friendlyError(e, "Reconstruction failed."));
     } finally {
       setLoading(false);
     }
