@@ -97,7 +97,6 @@ export default function ClassificationCard({ useDemo }) {
     tone:   { color: "blue",   icon: "◎", label: "Pure Tone"  },
     noise:  { color: "red",    icon: "≋", label: "Noise"      },
     music:  { color: "green",  icon: "♪", label: "Music"      },
-    speech: { color: "yellow", icon: "◉", label: "Speech"     },
   };
 
   const winnerColor = result
@@ -138,11 +137,10 @@ export default function ClassificationCard({ useDemo }) {
         lineHeight: 1.6,
       }}>
         Extracts 30 audio features (MFCCs, spectral centroid, ZCR, rolloff, RMS)
-        and feeds them into a RandomForest trained on synthetic data.
+        and feeds them into a RandomForest trained on real UrbanSound8k audio.
         Classifies into: <span style={{ color: "var(--blue)" }}>tone</span> ·{" "}
         <span style={{ color: "var(--red)" }}>noise</span> ·{" "}
-        <span style={{ color: "var(--green)" }}>music</span> ·{" "}
-        <span style={{ color: "var(--yellow)" }}>speech</span>
+        <span style={{ color: "var(--green)" }}>music</span>
       </div>
 
       {/* Error */}
@@ -309,9 +307,6 @@ export default function ClassificationCard({ useDemo }) {
               )}
               {result.predicted_class === "music" && (
                 <span> Rich harmonic content, moderate ZCR, structured MFCC pattern — typical of musical tones.</span>
-              )}
-              {result.predicted_class === "speech" && (
-                <span> Amplitude modulation, formant-like resonances, moderate ZCR — matches voiced speech pattern.</span>
               )}
             </div>
           </div>

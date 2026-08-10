@@ -283,7 +283,7 @@ async def upload_audio(file: UploadFile = File(...)):
     # the silence trim instead tends to grab onset/attack transients — a
     # systematically different, less representative distribution than what
     # training saw, which was hurting classification accuracy on real
-    # uploads (most noticeably for speech).
+    # uploads.
     MAX_SAMPLES = 256
     if len(signal) > MAX_SAMPLES:
         from classifier import pick_energetic_window
@@ -378,28 +378,20 @@ class ClassifyResponse(BaseModel):
 @app.post("/classify", response_model=ClassifyResponse, tags=["ML Classification"])
 def classify(req: ClassifyRequest):
     """
-    Classify an audio signal into: tone / noise / music / speech.
+    Classify an audio signal into: tone / noise / music.
 
     Uses MFCCs, spectral centroid, zero crossing rate, rolloff, and RMS
-    as features fed into a RandomForest trained on synthetic data.
+    as features fed into a RandomForest trained on real UrbanSound8k audio.
 
     Call this after /reconstruct to classify the reconstructed signal,
     or set use_reconstructed=False to classify the original.
     """
     global _current_signal, _current_samplerate
 
-    from classifier import classify_signal, CLASS_INFO, synthetic_demo_tone, SAMPLE_RATE
+    from classifier import classify_signal, CLASS_INFO
 
     if req.use_demo or _current_signal is None:
-        # NOTE: deliberately NOT cs_engine.generate_demo_signal() here.
-        # That signal uses sample_rate=1000 (chosen for the CS pipeline's
-        # sparsity demo), which Nyquist-limits it to low frequencies that
-        # can't be resolved cleanly in the short 32ms window classification
-        # actually analyzes. synthetic_demo_tone() generates directly at
-        # the classifier's native rate with frequencies chosen to resolve
-        # well in that window instead. See its docstring for the full
-        # reasoning.
-        signal, sr = synthetic_demo_tone(), SAMPLE_RATE
+        signal, sr = generate_demo_signal()
     else:
         signal = _current_signal
         sr     = _current_samplerate

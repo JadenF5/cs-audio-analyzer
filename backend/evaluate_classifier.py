@@ -1,18 +1,16 @@
 """
 evaluate_classifier.py — Run this locally after unzipping UrbanSound8k
-and LibriSpeech dev-clean
 ========================================================================
-Retrains the classifier on real data (UrbanSound8k for tone/noise/music,
-LibriSpeech for speech), runs 5-fold cross-validation, and prints a
-confusion matrix so you can see exactly where the model confuses classes.
+Retrains the classifier on real UrbanSound8k data (tone/noise/music),
+runs 5-fold cross-validation, and prints a confusion matrix so you can
+see exactly where the model confuses classes.
 
 Usage:
-    # from the backend/ folder, with UrbanSound8K/ and LibriSpeech/
-    # unzipped alongside it:
+    # from the backend/ folder, with UrbanSound8K/ unzipped alongside it:
     python evaluate_classifier.py
 
-    # or if your folders live elsewhere:
-    URBANSOUND8K_ROOT=/path/to/UrbanSound8K LIBRISPEECH_ROOT=/path/to/LibriSpeech/dev-clean python evaluate_classifier.py
+    # or if your UrbanSound8K folder lives elsewhere:
+    URBANSOUND8K_ROOT=/path/to/UrbanSound8K python evaluate_classifier.py
 """
 
 import numpy as np
@@ -28,8 +26,7 @@ import os
 
 
 def main():
-    print("Building dataset (real UrbanSound8k for tone/noise/music, "
-          "real LibriSpeech for speech)...")
+    print("Building dataset (real UrbanSound8k for tone/noise/music)...")
     X, y = generate_dataset()
     print(f"Total samples: {len(y)}")
     for cls in CLASSES:
