@@ -247,7 +247,7 @@ async def upload_audio(file: UploadFile = File(...)):
         )
 
     # Truncate to max 4096 samples for reasonable CS computation time
-    MAX_SAMPLES = 2048
+    MAX_SAMPLES = 256
     if len(signal) > MAX_SAMPLES:
         signal = signal[:MAX_SAMPLES]
 
