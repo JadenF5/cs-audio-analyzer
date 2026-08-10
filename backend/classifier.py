@@ -77,6 +77,39 @@ MAX_SPEECH_FILES = 150   # match the size of the other real buckets
 
 MODEL_CACHE_PATH = "audio_classifier_model.joblib"
 
+# Real audio classification always happens on the CS-reconstructed signal,
+# which is fixed at N_SAMPLES (256, ~32ms at SAMPLE_RATE). If real training
+# data is extracted from full multi-second clips instead, there's a
+# systematic train/inference mismatch — the model learns what SECONDS of
+# audio look like, then has to classify a 32ms fragment. This barely hurts
+# stationary classes (a steady hum sounds the same at 32ms or 3s) but badly
+# hurts speech, which is constantly changing phoneme to phoneme. Training
+# on short windows that match the real inference length fixes this.
+CLASSIFY_WINDOW_SAMPLES = N_SAMPLES   # 256 — must match production input length
+WINDOWS_PER_FILE = 3                  # multiple short windows per source
+                                       # file: more diverse examples (different
+                                       # moments/phonemes) instead of wasting
+                                       # most of a multi-second clip
+
+
+def _sample_windows(signal: np.ndarray,
+                    window_len: int = CLASSIFY_WINDOW_SAMPLES,
+                    n_windows: int = WINDOWS_PER_FILE,
+                    seed: int = 0) -> list:
+    """
+    Extract up to n_windows short windows spread across signal, so a single
+    long clip yields several training examples matching the length actually
+    seen at inference. Falls back to the whole (short) signal if it's
+    already <= window_len.
+    """
+    if len(signal) <= window_len:
+        return [signal]
+    max_start = len(signal) - window_len
+    rng = np.random.default_rng(seed)
+    n = min(n_windows, max_start + 1)
+    starts = sorted(rng.choice(max_start + 1, size=n, replace=False))
+    return [signal[s:s + window_len] for s in starts]
+
 
 # ── Data container ───────────────────────────────────────────
 @dataclass
@@ -259,21 +292,30 @@ def load_speech_dataset(root: str = SPEECH_DATA_ROOT,
     paths = paths[:max_files]
 
     X, y = [], []
-    for path in paths:
+    for i, path in enumerate(paths):
         try:
             signal, _ = librosa.load(path, sr=SAMPLE_RATE, mono=True)
             signal, _ = librosa.effects.trim(signal, top_db=25)
             if len(signal) < int(0.05 * SAMPLE_RATE):
                 continue
-            max_val = np.max(np.abs(signal))
-            if max_val > 0:
-                signal = signal / max_val
-            X.append(extract_features(signal, SAMPLE_RATE))
-            y.append("speech")
+            for window in _sample_windows(signal, seed=i):
+                max_val = np.max(np.abs(window))
+                if max_val > 0:
+                    window = window / max_val
+                X.append(extract_features(window, SAMPLE_RATE))
+                y.append("speech")
         except Exception as e:
             print(f"[load_speech_dataset] Skipping {path}: {e}")
 
-    print(f"[load_speech_dataset] speech: loaded {len(y)}/{len(paths)} clips")
+    # Cap total examples (not files) so class size stays comparable to
+    # before, now that each file can yield multiple window examples.
+    if len(y) > max_files:
+        idx = np.random.default_rng(1).choice(len(y), size=max_files, replace=False)
+        X = [X[i] for i in idx]
+        y = [y[i] for i in idx]
+
+    print(f"[load_speech_dataset] speech: {len(y)} short-window examples "
+          f"from {len(paths)} source files")
     return X, y
 
 
@@ -338,22 +380,33 @@ def load_real_dataset(metadata_csv: str = METADATA_CSV,
     for label, paths in buckets.items():
         rng.shuffle(paths)
         paths = paths[:max_per_class]
-        loaded = 0
-        for path in paths:
+        label_X, label_y = [], []
+        for i, path in enumerate(paths):
             try:
                 signal, _ = librosa.load(path, sr=SAMPLE_RATE, mono=True)
                 signal, _ = librosa.effects.trim(signal, top_db=25)
                 if len(signal) < int(0.05 * SAMPLE_RATE):   # skip near-silent clips
                     continue
-                max_val = np.max(np.abs(signal))
-                if max_val > 0:
-                    signal = signal / max_val
-                X.append(extract_features(signal, SAMPLE_RATE))
-                y.append(label)
-                loaded += 1
+                for window in _sample_windows(signal, seed=i):
+                    max_val = np.max(np.abs(window))
+                    if max_val > 0:
+                        window = window / max_val
+                    label_X.append(extract_features(window, SAMPLE_RATE))
+                    label_y.append(label)
             except Exception as e:
                 print(f"[load_real_dataset] Skipping {path}: {e}")
-        print(f"[load_real_dataset] {label}: loaded {loaded}/{len(paths)} clips")
+
+        # Cap total examples (not files) so class size stays comparable to
+        # before, now that each file can yield multiple window examples.
+        if len(label_y) > max_per_class:
+            idx = np.random.default_rng(1).choice(len(label_y), size=max_per_class, replace=False)
+            label_X = [label_X[i] for i in idx]
+            label_y = [label_y[i] for i in idx]
+
+        X += label_X
+        y += label_y
+        print(f"[load_real_dataset] {label}: {len(label_y)} short-window examples "
+              f"from {len(paths)} source files")
 
     return X, y
 
