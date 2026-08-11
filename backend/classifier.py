@@ -159,6 +159,8 @@ def extract_feature_summary(signal: np.ndarray,
     flatness  = librosa.feature.spectral_flatness(y=signal, n_fft=n_fft, hop_length=hop)
     bandwidth = librosa.feature.spectral_bandwidth(y=signal, sr=sr, n_fft=n_fft, hop_length=hop)
     mfccs     = librosa.feature.mfcc(y=signal, sr=sr, n_mfcc=N_MFCC, n_fft=n_fft, hop_length=hop)
+    chroma    = librosa.feature.chroma_stft(y=signal, sr=sr, n_fft=n_fft, hop_length=hop)
+    chroma_var = np.var(np.mean(chroma, axis=1))
 
     return {
         "spectral_centroid_hz":  round(float(np.mean(centroid)), 1),
@@ -169,6 +171,7 @@ def extract_feature_summary(signal: np.ndarray,
         "rms_energy":            round(float(np.mean(rms)), 4),
         "mfcc_1_mean":           round(float(np.mean(mfccs[0])), 2),
         "mfcc_2_mean":           round(float(np.mean(mfccs[1])), 2),
+        "chroma_variance":       round(float(chroma_var), 6),
     }
 
 

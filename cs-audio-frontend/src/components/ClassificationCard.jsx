@@ -136,8 +136,10 @@ export default function ClassificationCard({ useDemo }) {
         marginBottom: 16,
         lineHeight: 1.6,
       }}>
-        Extracts 30 audio features (MFCCs, spectral centroid, ZCR, rolloff, RMS)
-        and feeds them into a RandomForest trained on real UrbanSound8k audio.
+        Extracts 33 audio features (MFCCs, spectral centroid, bandwidth,
+        flatness, ZCR, rolloff, RMS, chroma variance) and feeds them into a
+        HistGradientBoosting classifier trained on UrbanSound8k + synthetic
+        augmentations.
         Classifies into: <span style={{ color: "var(--blue)" }}>tone</span> ·{" "}
         <span style={{ color: "var(--red)" }}>noise</span> ·{" "}
         <span style={{ color: "var(--green)" }}>music</span>
@@ -165,7 +167,7 @@ export default function ClassificationCard({ useDemo }) {
               Extracting features...
             </div>
             <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--muted)" }}>
-              MFCCs · spectral centroid · ZCR · rolloff · RMS
+              MFCCs · spectral centroid · bandwidth · flatness · ZCR · rolloff · RMS · chroma
             </div>
           </div>
         </div>
@@ -263,6 +265,21 @@ export default function ClassificationCard({ useDemo }) {
                 unit="Hz"
               />
               <FeatureRow
+                label="Spectral Bandwidth"
+                value={result.feature_summary.spectral_bandwidth_hz?.toFixed(1)}
+                unit="Hz"
+              />
+              <FeatureRow
+                label="Spectral Flatness"
+                value={result.feature_summary.spectral_flatness?.toFixed(4)}
+                unit=""
+              />
+              <FeatureRow
+                label="Chroma Variance"
+                value={result.feature_summary.chroma_variance?.toFixed(4)}
+                unit=""
+              />
+              <FeatureRow
                 label="Zero Crossing Rate"
                 value={result.feature_summary.zero_crossing_rate?.toFixed(4)}
                 unit=""
@@ -300,13 +317,13 @@ export default function ClassificationCard({ useDemo }) {
                 Why {result.class_label}?
               </span>
               {result.predicted_class === "tone" && (
-                <span> Low ZCR, narrow spectral centroid, low energy variation — hallmarks of a pure periodic signal.</span>
+                <span> Near‑zero spectral flatness, narrow bandwidth, low ZCR — hallmark of a pure tone.</span>
               )}
               {result.predicted_class === "noise" && (
-                <span> Very high ZCR, flat spectrum, high RMS variance — characteristic of white noise.</span>
+                <span> High spectral flatness, wide bandwidth, high ZCR — characteristic of unstructured noise.</span>
               )}
               {result.predicted_class === "music" && (
-                <span> Rich harmonic content, moderate ZCR, structured MFCC pattern — typical of musical tones.</span>
+                <span> Moderate flatness, structured harmonic content, varied chroma — typical of musical audio.</span>
               )}
             </div>
           </div>
