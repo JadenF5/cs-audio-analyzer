@@ -221,6 +221,14 @@ def _generate_synthetic_for(label: str, n: int) -> tuple[list, list]:
         y.append(label)
     return X, y
 
+def _generate_synthetic_custom(generator, n: int) -> tuple[list, list]:
+    X, y = [], []
+    for seed in range(n):
+        sig = generator(seed)
+        sig = sig / (np.max(np.abs(sig)) + 1e-10)
+        X.append(extract_features(sig))
+        y.append("noise")   # they are noise variants
+    return X, y
 
 # ── Real dataset loader (UrbanSound8k) ───────────────────────
 def load_real_dataset(
@@ -269,6 +277,21 @@ def load_real_dataset(
 
     return X, y
 
+# ── Generate colored noise ────────────────────────────────────────────────────
+def _generate_colored_noise(seed: int, length: int = N_SAMPLES, color: str = "pink") -> np.ndarray:
+    """Generate pink or bandpass noise to mimic wind / natural sounds."""
+    rng = np.random.default_rng(seed)
+    white = rng.standard_normal(length)
+    # 1/f filter: simple cumulative sum then bandpass
+    pink = np.cumsum(white)
+    pink = pink / (np.max(np.abs(pink)) + 1e-10)
+    # Optionally apply a mild bandpass (200-2000 Hz) to shape like wind
+    from scipy.signal import butter, sosfiltfilt  # scipy is likely already installed
+    sos = butter(4, [200, 2000], btype='band', fs=SAMPLE_RATE, output='sos')
+    colored = sosfiltfilt(sos, pink)
+    # Normalise
+    colored = colored / (np.max(np.abs(colored)) + 1e-10)
+    return colored.astype(np.float32)
 
 # ── Dataset builder ──────────────────────────────────────────
 def generate_dataset(use_real: bool = USE_REAL_DATA) -> tuple[np.ndarray, np.ndarray]:
@@ -291,12 +314,12 @@ def generate_dataset(use_real: bool = USE_REAL_DATA) -> tuple[np.ndarray, np.nda
         if X_real:
             # Generate synthetic data for ALL three classes
             X_tone, y_tone = _generate_synthetic_for("tone", N_PER_CLASS)
-            X_aug_noise, y_aug_noise = _generate_synthetic_for("noise", N_SYNTHETIC_NOISE_AUGMENT)
+            X_colored, y_colored = _generate_synthetic_custom(lambda s: _generate_colored_noise(s, length=N_SAMPLES, color="pink"), 30)
             # ← NEW: Augment music with synthetic harmonic music
             X_aug_music, y_aug_music = _generate_synthetic_for("music", 60)
 
-            X_all = X_real + X_tone + X_aug_noise + X_aug_music
-            y_all = list(y_real) + y_tone + y_aug_noise + y_aug_music
+            X_all = X_real + X_tone + X_colored + X_aug_music
+            y_all = list(y_real) + y_tone + y_colored + y_aug_music
             return np.array(X_all), np.array(y_all)
 
     # Fallback: fully synthetic
