@@ -359,6 +359,14 @@ def train_classifier() -> Pipeline:
 # ── Singleton model (load once, reuse) ───────────────────────
 _model: Pipeline | None = None
 
+# Keep in sync with extract_features()'s output length (13 MFCC means +
+# 13 MFCC stds + centroid + zcr + rolloff + rms = 30). Used to detect a
+# stale cached model trained on a different feature set — e.g. from an
+# earlier experiment with extra features — before it causes a cryptic
+# sklearn shape-mismatch error deep in an API request.
+EXPECTED_N_FEATURES = 30
+
+
 def get_model(force_retrain: bool = False) -> Pipeline:
     """
     Return the trained model.
@@ -368,6 +376,11 @@ def get_model(force_retrain: bool = False) -> Pipeline:
     restart). Pass force_retrain=True to ignore the cache and retrain
     from scratch — do this after changing CLASS_MAP, feature extraction,
     or the underlying data.
+
+    Validates the cached model's expected feature count before trusting
+    it — a stale cache trained on a different feature set (e.g. from an
+    earlier experiment) would otherwise fail with a confusing sklearn
+    error at classification time instead of just being retrained fresh.
     """
     global _model
     if _model is not None and not force_retrain:
@@ -375,8 +388,15 @@ def get_model(force_retrain: bool = False) -> Pipeline:
 
     if not force_retrain and os.path.exists(MODEL_CACHE_PATH):
         print(f"Loading cached model from {MODEL_CACHE_PATH}...")
-        _model = joblib.load(MODEL_CACHE_PATH)
-        return _model
+        cached = joblib.load(MODEL_CACHE_PATH)
+        n_features = getattr(cached.named_steps.get("scaler"), "n_features_in_", None)
+        if n_features == EXPECTED_N_FEATURES:
+            _model = cached
+            return _model
+        print(f"WARNING: cached model expects {n_features} features but "
+              f"extract_features() now produces {EXPECTED_N_FEATURES} — "
+              f"cache is stale (likely trained on a different feature set). "
+              f"Retraining fresh instead of using it.")
 
     _model = train_classifier()
     joblib.dump(_model, MODEL_CACHE_PATH)
