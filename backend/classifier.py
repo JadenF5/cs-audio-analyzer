@@ -289,12 +289,14 @@ def generate_dataset(use_real: bool = USE_REAL_DATA) -> tuple[np.ndarray, np.nda
     if use_real:
         X_real, y_real = load_real_dataset()
         if X_real:
-            # Generate synthetic tone data (no real tones any more)
+            # Generate synthetic data for ALL three classes
             X_tone, y_tone = _generate_synthetic_for("tone", N_PER_CLASS)
-            # Augment noise with synthetic Gaussian noise as before
             X_aug_noise, y_aug_noise = _generate_synthetic_for("noise", N_SYNTHETIC_NOISE_AUGMENT)
-            X_all = X_real + X_tone + X_aug_noise
-            y_all = list(y_real) + y_tone + y_aug_noise
+            # ← NEW: Augment music with synthetic harmonic music
+            X_aug_music, y_aug_music = _generate_synthetic_for("music", 60)
+
+            X_all = X_real + X_tone + X_aug_noise + X_aug_music
+            y_all = list(y_real) + y_tone + y_aug_noise + y_aug_music
             return np.array(X_all), np.array(y_all)
 
     # Fallback: fully synthetic
