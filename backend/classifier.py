@@ -1,32 +1,30 @@
 """
 classifier.py — ML Audio Classifier for Compressed Sensing Audio Analyzer
 =========================================================================
-Phase 4: Extract audio features from (reconstructed) signals and classify
-them into one of three categories: tone / noise / music.
+Classifies audio signals into: tone / noise / music
 
-Pipeline:
-  signal (time domain)
-    -> feature extraction (MFCCs, spectral centroid, ZCR, rolloff, RMS)
-    -> StandardScaler normalization
-    -> RandomForestClassifier
-    -> predicted class + confidence scores
+Key fixes over v1:
+  1. Added spectral flatness  — THE discriminator for Gaussian noise vs tonal signals
+                                (flatness ~1.0 = noise, ~0.0 = pure tone)
+  2. Added spectral bandwidth — spread of energy (narrow=tone, wide=noise/music)
+  3. Added chroma variance    — pitch class spread (music varies, tone is fixed)
+  4. Augment training noise class with synthetic Gaussian noise — fixes the
+     distribution mismatch where UrbanSound8k "noise" (drilling, AC) doesn't
+     look like pure Gaussian noise at inference time
+  5. Upgraded to HistGradientBoostingClassifier — typically 3-5% better than
+     RandomForest on tabular audio features, handles augmented data well
 
-Trained on real UrbanSound8k audio (tone <- car_horn/siren, noise <-
-air_conditioner/engine_idling/jackhammer/drilling, music <- street_music),
-using the FULL length of each (trimmed) clip — not short windows. A
-4th class, speech, was tried (real LibriSpeech data) but dropped: speech
-is highly non-stationary (constantly changing phoneme to phoneme), so it
-needed a training/inference window-length match that kept fighting the CS
-reconstruction pipeline's short (32ms) analysis window, and no fix held up
-reliably across the demo signal, real uploads, and redeploys. tone/noise/
-music are comparatively stationary sounds (a steady hum or horn sounds
-much the same over 32ms or 3 seconds), so full-clip training works well
-for them even against a short inference window — this is the same
-configuration that gave ~90%+ real held-out cross-validation accuracy
-and reliably correct demo/upload behavior before speech was ever added.
-
-Falls back to synthetic data if the real dataset isn't found locally
-(useful for a quick smoke test without downloading anything).
+Feature vector: 36 dimensions (up from 30)
+  - 13 MFCC means + 13 stds = 26  (timbre)
+  - spectral centroid mean    =  1  (brightness)
+  - spectral bandwidth mean   =  1  (energy spread — NEW)
+  - spectral rolloff mean     =  1  (energy tail)
+  - spectral flatness mean    =  1  (noise vs tonal — KEY NEW FEATURE)
+  - zero crossing rate mean   =  1  (noisiness proxy)
+  - RMS energy mean           =  1  (loudness)
+  - chroma variance           =  1  (pitch class spread — NEW)
+                               ---
+                                36 total
 """
 
 import os
@@ -37,7 +35,7 @@ from dataclasses import dataclass
 import numpy as np
 import librosa
 import joblib
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 
@@ -47,24 +45,25 @@ warnings.filterwarnings("ignore", category=UserWarning, module="librosa")
 # ── Constants ────────────────────────────────────────────────
 SAMPLE_RATE  = 8000
 N_SAMPLES    = 256
-N_FFT        = 128          # small fft for short signals
+N_FFT        = 128
+HOP          = 32           # N_FFT // 4
 N_MFCC       = 13
 CLASSES      = ["tone", "noise", "music"]
 N_PER_CLASS  = 150          # synthetic samples per class (fallback only)
 
+# How many synthetic Gaussian noise samples to inject into real noise class.
+# This bridges the gap between UrbanSound8k "noise" (environmental sounds)
+# and truly flat-spectrum Gaussian noise at inference time.
+N_SYNTHETIC_NOISE_AUGMENT = 60
+
 # ── Real dataset config (UrbanSound8k) ──────────────────────
-# Point these at wherever you unzipped fold1/fold2 locally. Layout expected:
-#   UrbanSound8K/metadata/UrbanSound8K.csv
-#   UrbanSound8K/audio/fold1/*.wav
-#   UrbanSound8K/audio/fold2/*.wav
 USE_REAL_DATA   = True
 REAL_DATA_ROOT  = os.environ.get("URBANSOUND8K_ROOT", "./UrbanSound8K")
 METADATA_CSV    = os.path.join(REAL_DATA_ROOT, "metadata", "UrbanSound8K.csv")
 AUDIO_DIR       = os.path.join(REAL_DATA_ROOT, "audio")
 FOLDS_TO_USE    = [1, 2]
-MAX_PER_REAL_CLASS = 150     # cap so no bucket dominates training
+MAX_PER_REAL_CLASS = 150
 
-# UrbanSound8k's 10 classes -> your 3 target classes.
 CLASS_MAP = {
     "car_horn":         "tone",
     "siren":            "tone",
@@ -76,59 +75,32 @@ CLASS_MAP = {
 }
 
 MODEL_CACHE_PATH = "audio_classifier_model.joblib"
-
-# Used by main.py's /upload endpoint to pick a representative slice of an
-# uploaded file for the CS pipeline, instead of always grabbing the very
-# first samples after the silence trim (which tends to be an onset/attack
-# transient rather than typical content).
 UPLOAD_WINDOW_SAMPLES = N_SAMPLES
-
-
-def pick_energetic_window(signal: np.ndarray,
-                          window_len: int = UPLOAD_WINDOW_SAMPLES,
-                          n_candidates: int = 5,
-                          seed: int | None = None) -> np.ndarray:
-    """
-    Pick a representative window from signal by sampling several candidate
-    positions and keeping the highest-energy one. Falls back to the whole
-    signal if it's already <= window_len.
-    """
-    if len(signal) <= window_len:
-        return signal
-    max_start = len(signal) - window_len
-    rng = np.random.default_rng(seed)
-    n = min(n_candidates, max_start + 1)
-    starts = rng.choice(max_start + 1, size=n, replace=False)
-    best_start = max(starts, key=lambda s: np.sum(signal[s:s + window_len] ** 2))
-    return signal[best_start:best_start + window_len]
 
 
 # ── Data container ───────────────────────────────────────────
 @dataclass
 class ClassificationResult:
     predicted_class:  str
-    confidence:       float           # probability of predicted class
-    all_scores:       dict            # {class: probability} for all classes
-    feature_summary:  dict            # key features for frontend display
-    signal_stats:     dict            # basic signal statistics
+    confidence:       float
+    all_scores:       dict
+    feature_summary:  dict
+    signal_stats:     dict
 
 
 # ── Feature extraction ───────────────────────────────────────
 def extract_features(signal: np.ndarray, sr: int = SAMPLE_RATE) -> np.ndarray:
     """
-    Extract a 30-dimensional feature vector from an audio signal.
+    Extract a 36-dimensional feature vector from an audio signal.
 
-    Features:
-      - 13 MFCC means     (timbre / frequency content)
-      - 13 MFCC stds      (variability of timbre)
-      - spectral centroid  (brightness — high = treble heavy)
-      - zero crossing rate (noisiness — high = noisy)
-      - spectral rolloff   (frequency where 85% of energy is below)
-      - RMS energy         (loudness)
+    The two most important NEW features vs v1:
+      - spectral_flatness: ~1.0 for Gaussian noise, ~0.0 for pure tones.
+        This single feature almost perfectly separates noise from tonal signals.
+      - spectral_bandwidth: wide for noise (energy spread everywhere),
+        narrow for tones (energy concentrated at a few frequencies).
 
-    These 30 features are classic audio fingerprints used in MIR research.
-    Works on signals of any length — n_fft is capped at N_FFT, so a longer
-    signal just produces more (averaged) analysis frames, not more features.
+    Works on any signal length — n_fft is fixed so longer signals just
+    produce more averaged analysis frames, not more features.
     """
     signal = signal.astype(np.float32)
     max_val = np.max(np.abs(signal))
@@ -136,25 +108,37 @@ def extract_features(signal: np.ndarray, sr: int = SAMPLE_RATE) -> np.ndarray:
         signal = signal / max_val
 
     n_fft = min(N_FFT, len(signal))
-    hop   = n_fft // 4
+    hop   = max(1, n_fft // 4)
 
-    mfccs    = librosa.feature.mfcc(y=signal, sr=sr, n_mfcc=N_MFCC,
-                                     n_fft=n_fft, hop_length=hop)
-    centroid = librosa.feature.spectral_centroid(y=signal, sr=sr,
+    mfccs     = librosa.feature.mfcc(y=signal, sr=sr, n_mfcc=N_MFCC,
+                                      n_fft=n_fft, hop_length=hop)
+    centroid  = librosa.feature.spectral_centroid(y=signal, sr=sr,
+                                                   n_fft=n_fft, hop_length=hop)
+    bandwidth = librosa.feature.spectral_bandwidth(y=signal, sr=sr,
+                                                    n_fft=n_fft, hop_length=hop)
+    rolloff   = librosa.feature.spectral_rolloff(y=signal, sr=sr,
                                                   n_fft=n_fft, hop_length=hop)
-    zcr      = librosa.feature.zero_crossing_rate(y=signal, hop_length=hop)
-    rolloff  = librosa.feature.spectral_rolloff(y=signal, sr=sr,
-                                                 n_fft=n_fft, hop_length=hop)
-    rms      = librosa.feature.rms(y=signal, hop_length=hop)
+    flatness  = librosa.feature.spectral_flatness(y=signal,
+                                                   n_fft=n_fft, hop_length=hop)
+    zcr       = librosa.feature.zero_crossing_rate(y=signal, hop_length=hop)
+    rms       = librosa.feature.rms(y=signal, hop_length=hop)
+    chroma    = librosa.feature.chroma_stft(y=signal, sr=sr,
+                                             n_fft=n_fft, hop_length=hop)
+    # Variance across the 12 pitch classes captures pitch diversity:
+    # music uses many pitch classes, tones use very few.
+    chroma_var = np.var(np.mean(chroma, axis=1))
 
     return np.concatenate([
-        np.mean(mfccs, axis=1),         # 13 features
-        np.std(mfccs,  axis=1),         # 13 features
-        [np.mean(centroid)],            #  1 feature
-        [np.mean(zcr)],                 #  1 feature
-        [np.mean(rolloff)],             #  1 feature
-        [np.mean(rms)],                 #  1 feature
-    ])                                  # = 30 features total
+        np.mean(mfccs, axis=1),    # 13 — timbre means
+        np.std(mfccs,  axis=1),    # 13 — timbre stds
+        [np.mean(centroid)],       #  1 — brightness
+        [np.mean(bandwidth)],      #  1 — energy spread  ← NEW
+        [np.mean(rolloff)],        #  1 — energy tail
+        [np.mean(flatness)],       #  1 — noise indicator ← KEY
+        [np.mean(zcr)],            #  1 — zero crossings
+        [np.mean(rms)],            #  1 — loudness
+        [float(chroma_var)],       #  1 — pitch diversity ← NEW
+    ])                             # = 36 features total
 
 
 def extract_feature_summary(signal: np.ndarray,
@@ -166,105 +150,85 @@ def extract_feature_summary(signal: np.ndarray,
         signal = signal / max_val
 
     n_fft = min(N_FFT, len(signal))
-    hop   = n_fft // 4
+    hop   = max(1, n_fft // 4)
 
-    centroid = librosa.feature.spectral_centroid(y=signal, sr=sr,
-                                                  n_fft=n_fft, hop_length=hop)
-    zcr      = librosa.feature.zero_crossing_rate(y=signal, hop_length=hop)
-    rolloff  = librosa.feature.spectral_rolloff(y=signal, sr=sr,
-                                                 n_fft=n_fft, hop_length=hop)
-    rms      = librosa.feature.rms(y=signal, hop_length=hop)
-    mfccs    = librosa.feature.mfcc(y=signal, sr=sr, n_mfcc=N_MFCC,
-                                     n_fft=n_fft, hop_length=hop)
+    centroid  = librosa.feature.spectral_centroid(y=signal, sr=sr, n_fft=n_fft, hop_length=hop)
+    zcr       = librosa.feature.zero_crossing_rate(y=signal, hop_length=hop)
+    rolloff   = librosa.feature.spectral_rolloff(y=signal, sr=sr, n_fft=n_fft, hop_length=hop)
+    rms       = librosa.feature.rms(y=signal, hop_length=hop)
+    flatness  = librosa.feature.spectral_flatness(y=signal, n_fft=n_fft, hop_length=hop)
+    bandwidth = librosa.feature.spectral_bandwidth(y=signal, sr=sr, n_fft=n_fft, hop_length=hop)
+    mfccs     = librosa.feature.mfcc(y=signal, sr=sr, n_mfcc=N_MFCC, n_fft=n_fft, hop_length=hop)
 
     return {
-        "spectral_centroid_hz": round(float(np.mean(centroid)), 1),
-        "zero_crossing_rate":   round(float(np.mean(zcr)), 4),
-        "spectral_rolloff_hz":  round(float(np.mean(rolloff)), 1),
-        "rms_energy":           round(float(np.mean(rms)), 4),
-        "mfcc_1_mean":          round(float(np.mean(mfccs[0])), 2),
-        "mfcc_2_mean":          round(float(np.mean(mfccs[1])), 2),
+        "spectral_centroid_hz":  round(float(np.mean(centroid)), 1),
+        "spectral_bandwidth_hz": round(float(np.mean(bandwidth)), 1),
+        "spectral_rolloff_hz":   round(float(np.mean(rolloff)), 1),
+        "spectral_flatness":     round(float(np.mean(flatness)), 4),
+        "zero_crossing_rate":    round(float(np.mean(zcr)), 4),
+        "rms_energy":            round(float(np.mean(rms)), 4),
+        "mfcc_1_mean":           round(float(np.mean(mfccs[0])), 2),
+        "mfcc_2_mean":           round(float(np.mean(mfccs[1])), 2),
     }
 
 
-# ── Synthetic dataset generation (fallback only) ─────────────
-def _generate_tone(seed: int) -> np.ndarray:
-    """1–6 pure sine waves at unrelated frequencies — sparse in frequency domain."""
+# ── Synthetic data generators ────────────────────────────────
+def _generate_tone(seed: int, length: int = N_SAMPLES) -> np.ndarray:
+    """1–6 pure sine waves — sparse in frequency domain, very low flatness."""
     rng = np.random.default_rng(seed)
-    t = np.linspace(0, N_SAMPLES / SAMPLE_RATE, N_SAMPLES, endpoint=False)
+    t = np.linspace(0, length / SAMPLE_RATE, length, endpoint=False)
     n_freqs = rng.integers(1, 7)
     freqs   = rng.uniform(80, 2000, n_freqs)
     amps    = rng.uniform(0.2, 1.0, n_freqs)
-    signal  = sum(a * np.sin(2 * np.pi * f * t)
-                  for f, a in zip(freqs, amps))
-    return signal
+    return sum(a * np.sin(2 * np.pi * f * t) for f, a in zip(freqs, amps))
 
 
-def _generate_noise(seed: int) -> np.ndarray:
-    """Pure Gaussian white noise — uniformly dense in frequency domain."""
+def _generate_noise(seed: int, length: int = N_SAMPLES) -> np.ndarray:
+    """Pure Gaussian white noise — flatness ~0.5-1.0, bandwidth very wide."""
     rng = np.random.default_rng(seed)
-    return rng.standard_normal(N_SAMPLES)
+    return rng.standard_normal(length)
 
 
-def _generate_music(seed: int) -> np.ndarray:
-    """Many overlapping harmonically-related frequencies (chord/melody)."""
+def _generate_music(seed: int, length: int = N_SAMPLES) -> np.ndarray:
+    """Harmonic overtone series — rich but structured, low-moderate flatness."""
     rng = np.random.default_rng(seed)
-    t = np.linspace(0, N_SAMPLES / SAMPLE_RATE, N_SAMPLES, endpoint=False)
+    t = np.linspace(0, length / SAMPLE_RATE, length, endpoint=False)
     root = rng.uniform(80, 600)
     n_harmonics = rng.integers(5, 15)
     amps = rng.uniform(0.1, 1.0, n_harmonics)
     signal = sum(a * np.sin(2 * np.pi * root * (h + 1) * t)
                  for h, a in enumerate(amps))
-    root2  = root * rng.choice([1.25, 1.5, 2.0])
+    root2 = root * rng.choice([1.25, 1.5, 2.0])
     n_harm2 = rng.integers(3, 8)
-    amps2   = rng.uniform(0.05, 0.5, n_harm2)
+    amps2 = rng.uniform(0.05, 0.5, n_harm2)
     signal += sum(a * np.sin(2 * np.pi * root2 * (h + 1) * t)
                   for h, a in enumerate(amps2))
     return signal
 
 
-def _generate_synthetic_for(label: str, n: int = N_PER_CLASS) -> tuple[list, list]:
-    """Generate n synthetic examples for a single class label."""
-    generators = {
-        "tone":  _generate_tone,
-        "noise": _generate_noise,
-        "music": _generate_music,
-    }
-    gen = generators[label]
+def _generate_synthetic_for(label: str, n: int) -> tuple[list, list]:
+    gen = {"tone": _generate_tone, "noise": _generate_noise, "music": _generate_music}[label]
     X, y = [], []
     for seed in range(n):
-        signal = gen(seed)
-        max_val = np.max(np.abs(signal))
-        if max_val > 0:
-            signal = signal / max_val
-        X.append(extract_features(signal))
+        sig = gen(seed)
+        sig = sig / (np.max(np.abs(sig)) + 1e-10)
+        X.append(extract_features(sig))
         y.append(label)
     return X, y
 
 
-def load_real_dataset(metadata_csv: str = METADATA_CSV,
-                      audio_dir: str = AUDIO_DIR,
-                      folds: list[int] = FOLDS_TO_USE,
-                      max_per_class: int = MAX_PER_REAL_CLASS) -> tuple[list, list]:
-    """
-    Load real UrbanSound8k clips, map them to tone/noise/music via
-    CLASS_MAP, and extract features from each FULL (trimmed) clip.
-
-    Requires the dataset to already be unzipped locally (see REAL_DATA_ROOT /
-    METADATA_CSV / AUDIO_DIR above). Skips (with a printed warning) any file
-    that fails to load or is too short/silent after trimming.
-
-    Returns:
-        (X, y) as plain lists (not yet np.array).
-    """
+# ── Real dataset loader (UrbanSound8k) ───────────────────────
+def load_real_dataset(
+    metadata_csv: str = METADATA_CSV,
+    audio_dir:    str = AUDIO_DIR,
+    folds:        list = FOLDS_TO_USE,
+    max_per_class: int = MAX_PER_REAL_CLASS,
+) -> tuple[list, list]:
     if not os.path.exists(metadata_csv):
         print(f"[load_real_dataset] Metadata CSV not found at {metadata_csv} "
-              f"— falling back to fully synthetic data. Set URBANSOUND8K_ROOT "
-              f"or edit REAL_DATA_ROOT in classifier.py to point at your "
-              f"unzipped UrbanSound8k folder.")
+              f"— falling back to fully synthetic data.")
         return [], []
 
-    # Group candidate file paths by target class
     buckets: dict[str, list[str]] = {"tone": [], "noise": [], "music": []}
     with open(metadata_csv, newline="") as f:
         for row in csv.DictReader(f):
@@ -276,7 +240,6 @@ def load_real_dataset(metadata_csv: str = METADATA_CSV,
             path = os.path.join(audio_dir, f"fold{fold}", row["slice_file_name"])
             buckets[target].append(path)
 
-    # Balance: cap each bucket, shuffle deterministically first
     rng = np.random.default_rng(0)
     X, y = [], []
     for label, paths in buckets.items():
@@ -287,7 +250,7 @@ def load_real_dataset(metadata_csv: str = METADATA_CSV,
             try:
                 signal, _ = librosa.load(path, sr=SAMPLE_RATE, mono=True)
                 signal, _ = librosa.effects.trim(signal, top_db=25)
-                if len(signal) < int(0.05 * SAMPLE_RATE):   # skip near-silent clips
+                if len(signal) < int(0.05 * SAMPLE_RATE):
                     continue
                 max_val = np.max(np.abs(signal))
                 if max_val > 0:
@@ -302,73 +265,77 @@ def load_real_dataset(metadata_csv: str = METADATA_CSV,
     return X, y
 
 
+# ── Dataset builder ──────────────────────────────────────────
 def generate_dataset(use_real: bool = USE_REAL_DATA) -> tuple[np.ndarray, np.ndarray]:
     """
     Build the full labeled training set.
 
-    If use_real=True and the UrbanSound8k metadata CSV can be found, all
-    three classes come from real UrbanSound8k audio (full clip length).
-    Otherwise, falls back to fully synthetic data for all three classes.
+    When real UrbanSound8k data is available:
+      - Loads real clips for tone / noise / music
+      - Augments the noise class with N_SYNTHETIC_NOISE_AUGMENT synthetic
+        Gaussian noise samples — this is the key fix for pure-noise misclassification.
+        UrbanSound8k noise (drilling, AC, idling) has tonal components and low-mid
+        flatness. Pure Gaussian noise has flatness ~0.5-1.0, which the model never
+        sees in real training data alone, causing it to misclassify flat-spectrum
+        noise as music. Augmenting with synthetic noise teaches the flatness signal.
 
-    Returns:
-        (X, y) where X is (n_samples, n_features) and y is string labels.
+    When real data is unavailable: falls back to fully synthetic data.
     """
     if use_real:
         X_real, y_real = load_real_dataset()
         if X_real:
-            return np.array(X_real), np.array(y_real)
-        # else: real data unavailable, fall through to full synthetic
+            print(f"Augmenting noise class with {N_SYNTHETIC_NOISE_AUGMENT} "
+                  f"synthetic Gaussian noise samples...")
+            X_aug, y_aug = _generate_synthetic_for("noise", N_SYNTHETIC_NOISE_AUGMENT)
+            X_all = X_real + X_aug
+            y_all = list(y_real) + y_aug
+            return np.array(X_all), np.array(y_all)
 
+    # Fallback: all synthetic
     X, y = [], []
     for label in CLASSES:
         X_lab, y_lab = _generate_synthetic_for(label, N_PER_CLASS)
         X += X_lab
         y += y_lab
-
     return np.array(X), np.array(y)
 
 
-# ── Model training ───────────────────────────────────────────
+# ── Model ────────────────────────────────────────────────────
 def train_classifier() -> Pipeline:
     """
-    Train a RandomForest classifier on real (or synthetic fallback) data.
+    Train on real + augmented data using HistGradientBoostingClassifier.
 
-    Returns a sklearn Pipeline (scaler + classifier) ready for prediction.
+    HistGradientBoostingClassifier is sklearn's fastest and most accurate
+    tree ensemble — uses histogram-based splits (like LightGBM) and handles
+    mixed-scale features well without needing careful normalization, though
+    we keep the StandardScaler for good measure.
     """
     print("Training audio classifier...")
     X, y = generate_dataset()
 
     pipeline = Pipeline([
         ("scaler", StandardScaler()),
-        ("clf",    RandomForestClassifier(
-            n_estimators=200,
-            max_depth=None,
-            min_samples_split=2,
+        ("clf", HistGradientBoostingClassifier(
+            max_iter=300,
+            max_depth=6,
+            learning_rate=0.08,
+            min_samples_leaf=8,
+            l2_regularization=0.1,
             random_state=42,
-            n_jobs=-1,
             class_weight="balanced",
         )),
     ])
 
     pipeline.fit(X, y)
-    print(f"Classifier trained on {len(y)} samples.")
-    print(f"Classes: {CLASSES}")
+    print(f"Classifier trained on {len(y)} samples ({len(set(y))} classes).")
     return pipeline
 
 
-# ── Singleton model (load once, reuse) ───────────────────────
+# ── Singleton model ───────────────────────────────────────────
 _model: Pipeline | None = None
 
 def get_model(force_retrain: bool = False) -> Pipeline:
-    """
-    Return the trained model.
-
-    Loads from MODEL_CACHE_PATH on disk if present (so real-data training,
-    which reads hundreds of audio files, doesn't re-run on every server
-    restart). Pass force_retrain=True to ignore the cache and retrain
-    from scratch — do this after changing CLASS_MAP, feature extraction,
-    or the underlying data.
-    """
+    """Load cached model from disk, or train if not found."""
     global _model
     if _model is not None and not force_retrain:
         return _model
@@ -384,25 +351,14 @@ def get_model(force_retrain: bool = False) -> Pipeline:
     return _model
 
 
-# ── Main classify function ───────────────────────────────────
+# ── Main classify function ────────────────────────────────────
 def classify_signal(signal: np.ndarray,
                     sr: int = SAMPLE_RATE) -> ClassificationResult:
     """
-    Classify a time-domain audio signal into tone/noise/music.
+    Classify a time-domain audio signal into tone / noise / music.
 
-    Args:
-        signal: 1D numpy array (time domain), at its ORIGINAL sample rate
-        sr:     the signal's actual sample rate in Hz
-
-    Returns:
-        ClassificationResult with prediction, confidence, and feature summary
-
-    Resamples to the fixed SAMPLE_RATE if needed, since librosa's spectral
-    features (centroid, rolloff, MFCCs) are scaled by sr — feeding in a
-    signal at some other sr would produce features on a different numeric
-    scale than what the classifier learned. Does NOT truncate to a fixed
-    window length: the model is trained on full-clip features, and
-    extract_features already handles variable-length input cleanly.
+    Resamples to SAMPLE_RATE if needed so features are on the same
+    numeric scale as what the classifier was trained on.
     """
     model = get_model()
 
@@ -413,54 +369,65 @@ def classify_signal(signal: np.ndarray,
 
     features = extract_features(signal, sr).reshape(1, -1)
 
-    predicted    = model.predict(features)[0]
+    predicted     = model.predict(features)[0]
     probabilities = model.predict_proba(features)[0]
-    class_order  = model.classes_
+    class_order   = model.classes_
 
     all_scores = {
-        cls: round(float(prob), 4)
+        str(cls): round(float(prob), 4)
         for cls, prob in zip(class_order, probabilities)
     }
     confidence = round(float(max(probabilities)), 4)
-
-    feature_summary = extract_feature_summary(signal, sr)
-
-    signal_stats = {
-        "mean":     round(float(np.mean(signal)), 4),
-        "std":      round(float(np.std(signal)), 4),
-        "max_abs":  round(float(np.max(np.abs(signal))), 4),
-        "n_samples": len(signal),
-    }
 
     return ClassificationResult(
         predicted_class = predicted,
         confidence      = confidence,
         all_scores      = all_scores,
-        feature_summary = feature_summary,
-        signal_stats    = signal_stats,
+        feature_summary = extract_feature_summary(signal, sr),
+        signal_stats    = {
+            "mean":      round(float(np.mean(signal)), 4),
+            "std":       round(float(np.std(signal)), 4),
+            "max_abs":   round(float(np.max(np.abs(signal))), 4),
+            "n_samples": len(signal),
+        },
     )
 
 
-# ── Class descriptions for frontend ─────────────────────────
+# ── Helper for upload endpoint ────────────────────────────────
+def pick_energetic_window(signal: np.ndarray,
+                          window_len: int = UPLOAD_WINDOW_SAMPLES,
+                          n_candidates: int = 5,
+                          seed: int | None = None) -> np.ndarray:
+    if len(signal) <= window_len:
+        return signal
+    max_start = len(signal) - window_len
+    rng = np.random.default_rng(seed)
+    n = min(n_candidates, max_start + 1)
+    starts = rng.choice(max_start + 1, size=n, replace=False)
+    best_start = max(starts, key=lambda s: np.sum(signal[s:s + window_len] ** 2))
+    return signal[best_start:best_start + window_len]
+
+
+# ── Class info for frontend ───────────────────────────────────
 CLASS_INFO = {
     "tone": {
         "label":       "Pure Tone",
-        "description": "1–3 pure sine waves. Very sparse in frequency domain. "
-                       "Perfect for CS recovery.",
+        "description": "1–6 pure sine waves. Very sparse in frequency domain. "
+                       "Spectral flatness ~0 — perfect for CS recovery.",
         "color":       "blue",
         "icon":        "◎",
     },
     "noise": {
         "label":       "Noise",
-        "description": "Gaussian white noise. Uniform frequency distribution. "
-                       "Not sparse — CS recovery will struggle.",
+        "description": "Broadband noise. Flat frequency spectrum (flatness ~0.5–1.0). "
+                       "Not sparse — CS recovery will struggle without enough measurements.",
         "color":       "red",
         "icon":        "≋",
     },
     "music": {
         "label":       "Music",
-        "description": "Harmonic overtones — rich frequency structure. "
-                       "Moderately sparse in frequency domain.",
+        "description": "Harmonic overtone structure. Rich but organized frequency content. "
+                       "Moderately sparse — CS recovery depends on compression ratio.",
         "color":       "green",
         "icon":        "♪",
     },
