@@ -80,4 +80,4 @@ cs-audio-frontend/
 
 ## Notice
 
-ML Classification might not work on the first try due to render being on the free tier, so you get a message, saying render will be waking up, so just rerun the ML Classification again to get the data after.
+ML Classification might not work on the first try due to render being on the free tier, so you get the message, "The server was waking up from inactivity (free hosting tier) and took longer than expected. Please try again — it should be fast now that it's warm." Just press classify signal again to get the classiciation after.
