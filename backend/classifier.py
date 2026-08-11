@@ -65,8 +65,8 @@ FOLDS_TO_USE    = [1, 2]
 MAX_PER_REAL_CLASS = 150
 
 CLASS_MAP = {
-    "car_horn":         "tone",
-    "siren":            "tone",
+    # "car_horn":         "tone",
+    # "siren":            "tone",
     "air_conditioner":  "noise",
     "engine_idling":    "noise",
     "jackhammer":       "noise",
@@ -177,10 +177,15 @@ def _generate_tone(seed: int, length: int = N_SAMPLES) -> np.ndarray:
     """1–6 pure sine waves — sparse in frequency domain, very low flatness."""
     rng = np.random.default_rng(seed)
     t = np.linspace(0, length / SAMPLE_RATE, length, endpoint=False)
-    n_freqs = rng.integers(1, 7)
-    freqs   = rng.uniform(80, 2000, n_freqs)
-    amps    = rng.uniform(0.2, 1.0, n_freqs)
-    return sum(a * np.sin(2 * np.pi * f * t) for f, a in zip(freqs, amps))
+    if rng.random() < 0.5:   # pure single frequency
+        freq = rng.uniform(80, 2000)
+        amp = rng.uniform(0.5, 1.0)
+        return amp * np.sin(2 * np.pi * freq * t)
+    else:                     # 1–6 sine waves (original behaviour)
+        n_freqs = rng.integers(2, 7)   # start from 2 for multi
+        freqs   = rng.uniform(80, 2000, n_freqs)
+        amps    = rng.uniform(0.2, 1.0, n_freqs)
+        return sum(a * np.sin(2 * np.pi * f * t) for f, a in zip(freqs, amps))
 
 
 def _generate_noise(seed: int, length: int = N_SAMPLES) -> np.ndarray:
@@ -284,21 +289,21 @@ def generate_dataset(use_real: bool = USE_REAL_DATA) -> tuple[np.ndarray, np.nda
     if use_real:
         X_real, y_real = load_real_dataset()
         if X_real:
-            print(f"Augmenting noise class with {N_SYNTHETIC_NOISE_AUGMENT} "
-                  f"synthetic Gaussian noise samples...")
-            X_aug, y_aug = _generate_synthetic_for("noise", N_SYNTHETIC_NOISE_AUGMENT)
-            X_all = X_real + X_aug
-            y_all = list(y_real) + y_aug
+            # Generate synthetic tone data (no real tones any more)
+            X_tone, y_tone = _generate_synthetic_for("tone", N_PER_CLASS)
+            # Augment noise with synthetic Gaussian noise as before
+            X_aug_noise, y_aug_noise = _generate_synthetic_for("noise", N_SYNTHETIC_NOISE_AUGMENT)
+            X_all = X_real + X_tone + X_aug_noise
+            y_all = list(y_real) + y_tone + y_aug_noise
             return np.array(X_all), np.array(y_all)
 
-    # Fallback: all synthetic
+    # Fallback: fully synthetic
     X, y = [], []
     for label in CLASSES:
         X_lab, y_lab = _generate_synthetic_for(label, N_PER_CLASS)
         X += X_lab
         y += y_lab
     return np.array(X), np.array(y)
-
 
 # ── Model ────────────────────────────────────────────────────
 def train_classifier() -> Pipeline:
