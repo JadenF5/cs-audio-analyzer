@@ -185,7 +185,7 @@ def health_check():
 
 @app.get("/demo", response_model=ReconstructResponse, tags=["CS Pipeline"])
 def run_demo(
-    compression_ratio: float = 0.25,
+    compression_ratio: float = 0.5,
     seed: int = 42
 ):
     """
