@@ -236,6 +236,7 @@ def load_real_dataset(
     audio_dir:    str = AUDIO_DIR,
     folds:        list = FOLDS_TO_USE,
     max_per_class: int = MAX_PER_REAL_CLASS,
+    window_length: int | None = None,
 ) -> tuple[list, list]:
     if not os.path.exists(metadata_csv):
         print(f"[load_real_dataset] Metadata CSV not found at {metadata_csv} "
@@ -259,7 +260,8 @@ def load_real_dataset(
         rng.shuffle(paths)
         paths = paths[:max_per_class]
         loaded = 0
-        for path in paths:
+        MAX_WINDOWS_PER_CLIP = 20
+        for i, path in enumerate(paths):
             try:
                 signal, _ = librosa.load(path, sr=SAMPLE_RATE, mono=True)
                 signal, _ = librosa.effects.trim(signal, top_db=25)
@@ -268,12 +270,34 @@ def load_real_dataset(
                 max_val = np.max(np.abs(signal))
                 if max_val > 0:
                     signal = signal / max_val
-                X.append(extract_features(signal, SAMPLE_RATE))
-                y.append(label)
-                loaded += 1
+
+                if window_length and len(signal) > window_length:
+                    step = window_length // 2
+                    # Take up to MAX_WINDOWS_PER_CLIP evenly spaced windows
+                    possible_starts = list(range(0, len(signal) - window_length + 1, step))
+                    if len(possible_starts) > MAX_WINDOWS_PER_CLIP:
+                        # Choose evenly spaced indices
+                        indices = np.linspace(0, len(possible_starts) - 1, MAX_WINDOWS_PER_CLIP, dtype=int)
+                        starts = [possible_starts[j] for j in indices]
+                    else:
+                        starts = possible_starts
+                    for start in starts:
+                        window = signal[start:start + window_length]
+                        X.append(extract_features(window, SAMPLE_RATE))
+                        y.append(label)
+                        loaded += 1
+                else:
+                    X.append(extract_features(signal, SAMPLE_RATE))
+                    y.append(label)
+                    loaded += 1
             except Exception as e:
                 print(f"[load_real_dataset] Skipping {path}: {e}")
-        print(f"[load_real_dataset] {label}: loaded {loaded}/{len(paths)} clips")
+
+            # Show progress every 10 clips
+            if (i + 1) % 10 == 0:
+                print(f"[load_real_dataset] {label}: processing {i+1}/{len(paths)} clips...", flush=True)
+
+        print(f"[load_real_dataset] {label}: loaded {loaded} windows from {len(paths)} clips", flush=True)
 
     return X, y
 
@@ -310,7 +334,7 @@ def generate_dataset(use_real: bool = USE_REAL_DATA) -> tuple[np.ndarray, np.nda
     When real data is unavailable: falls back to fully synthetic data.
     """
     if use_real:
-        X_real, y_real = load_real_dataset()
+        X_real, y_real = load_real_dataset(window_length=N_SAMPLES)
         if X_real:
             # Synthetic tones (needed because we removed real car_horn/siren)
             X_tone, y_tone = _generate_synthetic_for("tone", N_PER_CLASS)
@@ -320,11 +344,10 @@ def generate_dataset(use_real: bool = USE_REAL_DATA) -> tuple[np.ndarray, np.nda
 
             # Coloured (pink/bandpass) noise — helps with wind, water, etc.
             X_colored, y_colored = _generate_synthetic_custom(
-                lambda s: _generate_colored_noise(s, length=N_SAMPLES, color="pink"), 30
-            )
+                lambda s: _generate_colored_noise(s, length=N_SAMPLES, color="pink"), 30)
 
             # Synthetic harmonic music — reinforces music class
-            X_aug_music, y_aug_music = _generate_synthetic_for("music", 60)
+            X_aug_music, y_aug_music = _generate_synthetic_for("music", 100)
 
             X_all = X_real + X_tone + X_aug_noise + X_colored + X_aug_music
             y_all = list(y_real) + y_tone + y_aug_noise + y_colored + y_aug_music
