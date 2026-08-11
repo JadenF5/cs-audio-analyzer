@@ -59,8 +59,10 @@ app.add_middleware(
 
 # ── In-memory signal store (simple, no DB needed for Phase 2) ─
 # In production this would be a proper cache/storage layer.
-_current_signal:     Optional[np.ndarray] = None
-_current_samplerate: Optional[int]        = None
+_current_signal_full: Optional[np.ndarray] = None   # full trimmed upload — for classification
+_current_signal_cs:   Optional[np.ndarray] = None   # 256-sample slice — for the CS solve
+_current_samplerate:  Optional[int]        = None
+_last_reconstructed:  Optional[np.ndarray] = None   # most recent CS reconstruction output
 
 
 # ── Request / Response models ────────────────────────────────
@@ -269,31 +271,35 @@ async def upload_audio(file: UploadFile = File(...)):
             detail=f"Could not load audio file: {str(e)}"
         )
 
-    # Truncate uploaded audio to a size the CS solve can actually handle
-    # quickly. build_sensing_matrix() builds a dense N×N matrix and the
-    # l1-minimization solve scales roughly N²-N³ — 256 (matching the demo
-    # signal, already proven fast) keeps this responsive even on a
-    # constrained free-tier CPU. A much larger N (the old 2048 cap) can
-    # take long enough to time out or fail outright under limited compute.
+    # Split into two purposes from here on:
+    #   - a short, CS-solve-sized slice (fast ℓ1-minimization)
+    #   - the full trimmed signal (used for classification, which needs
+    #     more context than 32ms to recognize something as complex as
+    #     music — see classify_signal's multi-window averaging)
+    global _current_signal_full, _current_signal_cs, _current_samplerate, _last_reconstructed
+
+    _current_signal_full = signal   # full (trimmed, up to 2s) — for classification
+    _current_samplerate  = int(sr)
+    _last_reconstructed  = None      # invalidate any previous reconstruction
+
+    # Truncate a SEPARATE copy for the CS solve. build_sensing_matrix()
+    # builds a dense N×N matrix and the l1-minimization solve scales
+    # roughly N²-N³ — 256 keeps this responsive even on a constrained
+    # free-tier CPU. A much larger N (the old 2048 cap) can take long
+    # enough to time out or fail outright under limited compute.
     #
     # Use an energy-based window pick rather than always the literal first
-    # 256 samples: the classifier is trained on randomly-positioned windows
-    # (see classifier.py's _sample_windows), which mostly land on real
-    # voiced/energetic content. Always grabbing the first slice right after
-    # the silence trim instead tends to grab onset/attack transients — a
-    # systematically different, less representative distribution than what
-    # training saw, which was hurting classification accuracy on real
-    # uploads.
+    # 256 samples: always grabbing the first slice right after the silence
+    # trim tends to grab onset/attack transients rather than representative
+    # content.
     MAX_SAMPLES = 256
     if len(signal) > MAX_SAMPLES:
         from classifier import pick_energetic_window
-        signal = pick_energetic_window(signal, window_len=MAX_SAMPLES, seed=0)
+        _current_signal_cs = pick_energetic_window(signal, window_len=MAX_SAMPLES, seed=0)
+    else:
+        _current_signal_cs = signal
 
-    # Store in memory
-    _current_signal     = signal
-    _current_samplerate = int(sr)
-
-    info = get_signal_info(signal, int(sr))
+    info = get_signal_info(_current_signal_cs, int(sr))
 
     return SignalInfoResponse(
         duration_sec   = info.duration_sec,
@@ -331,13 +337,13 @@ def reconstruct(req: ReconstructRequest):
 
     Returns full signal arrays + quality metrics for visualization.
     """
-    global _current_signal, _current_samplerate
+    global _current_signal_cs, _current_samplerate, _last_reconstructed
 
     # Choose signal source
-    if req.use_demo or _current_signal is None:
+    if req.use_demo or _current_signal_cs is None:
         signal, sr = generate_demo_signal(seed=req.seed)
     else:
-        signal = _current_signal
+        signal = _current_signal_cs
         sr     = _current_samplerate
 
     try:
@@ -349,6 +355,10 @@ def reconstruct(req: ReconstructRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"CS pipeline failed: {str(e)}")
+
+    # Remember the reconstruction so /classify can honor use_reconstructed=True
+    # (classify the actual CS output, not just the pre-reconstruction upload).
+    _last_reconstructed = np.array(result.reconstructed)
 
     return _result_to_response(result)
 
@@ -383,18 +393,23 @@ def classify(req: ClassifyRequest):
     Uses MFCCs, spectral centroid, zero crossing rate, rolloff, and RMS
     as features fed into a RandomForest trained on real UrbanSound8k audio.
 
-    Call this after /reconstruct to classify the reconstructed signal,
-    or set use_reconstructed=False to classify the original.
+    use_reconstructed=True classifies the actual output of the most recent
+    /reconstruct call (demonstrates whether CS recovery preserves enough
+    signal to still classify correctly). use_reconstructed=False classifies
+    the full original upload instead — this has much more audio to work
+    with (not limited to the CS solve's 256-sample cap), which matters for
+    complex/non-stationary classes like music.
     """
-    global _current_signal, _current_samplerate
+    global _current_signal_full, _current_samplerate, _last_reconstructed
 
     from classifier import classify_signal, CLASS_INFO
 
-    if req.use_demo or _current_signal is None:
+    if req.use_demo or _current_signal_full is None:
         signal, sr = generate_demo_signal()
+    elif req.use_reconstructed and _last_reconstructed is not None:
+        signal, sr = _last_reconstructed, _current_samplerate
     else:
-        signal = _current_signal
-        sr     = _current_samplerate
+        signal, sr = _current_signal_full, _current_samplerate
 
     try:
         result = classify_signal(signal, int(sr))
