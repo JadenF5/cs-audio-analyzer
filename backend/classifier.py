@@ -309,18 +309,24 @@ def generate_dataset(use_real: bool = USE_REAL_DATA) -> tuple[np.ndarray, np.nda
 
     When real data is unavailable: falls back to fully synthetic data.
     """
-    if use_real:
-        X_real, y_real = load_real_dataset()
-        if X_real:
-            # Generate synthetic data for ALL three classes
-            X_tone, y_tone = _generate_synthetic_for("tone", N_PER_CLASS)
-            X_colored, y_colored = _generate_synthetic_custom(lambda s: _generate_colored_noise(s, length=N_SAMPLES, color="pink"), 30)
-            # ← NEW: Augment music with synthetic harmonic music
-            X_aug_music, y_aug_music = _generate_synthetic_for("music", 60)
+    def generate_dataset(use_real: bool = USE_REAL_DATA) -> tuple[np.ndarray, np.ndarray]:
+        if use_real:
+            X_real, y_real = load_real_dataset()
+            if X_real:
+                # Synthetic tones (needed because we removed real car_horn/siren)
+                X_tone, y_tone = _generate_synthetic_for("tone", N_PER_CLASS)
 
-            X_all = X_real + X_tone + X_colored + X_aug_music
-            y_all = list(y_real) + y_tone + y_colored + y_aug_music
-            return np.array(X_all), np.array(y_all)
+                # White Gaussian noise augmentation — the most important noise discriminator
+                X_aug_noise, y_aug_noise = _generate_synthetic_for("noise", N_SYNTHETIC_NOISE_AUGMENT)
+
+                # Coloured (pink/bandpass) noise — helps with wind, water, etc.
+                X_colored, y_colored = _generate_synthetic_custom(lambda s: _generate_colored_noise(s, length=N_SAMPLES, color="pink"), 30)
+                # Synthetic harmonic music — reinforces music class
+                X_aug_music, y_aug_music = _generate_synthetic_for("music", 60)
+
+                X_all = X_real + X_tone + X_aug_noise + X_colored + X_aug_music
+                y_all = list(y_real) + y_tone + y_aug_noise + y_colored + y_aug_music
+                return np.array(X_all), np.array(y_all)
 
     # Fallback: fully synthetic
     X, y = [], []
