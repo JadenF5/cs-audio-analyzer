@@ -77,3 +77,7 @@ cs-audio-frontend/
 |   └── WaveformChart.jsx
 └── public/
 ```
+
+## Notice
+
+ML Classification might not work on the first try due to render being on the free tier, so you get a message, saying render will be waking up, so just rerun the ML Classification again to get the data after.
