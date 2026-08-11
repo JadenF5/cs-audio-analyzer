@@ -54,6 +54,7 @@ A full‑stack web application that reconstructs sparse audio signals from far f
 
 ## Project Structure
 
+```
 backend/
 ├── main.py # FastAPI server
 ├── cs_engine.py # Compressed sensing algorithms
@@ -75,3 +76,4 @@ cs-audio-frontend/
 |   ├── MetricsPanel.jsx
 |   └── WaveformChart.jsx
 └── public/
+```
